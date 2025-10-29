@@ -1,0 +1,506 @@
+--[[
+	rbimgui-2
+	version 1.2
+	by Singularity
+        https://v3rmillion.net/member.php?action=profile&uid=947830
+        Singularity#5490
+--]]
+
+repeat wait() until game:GetService("Players").LocalPlayer
+if game:GetService("CoreGui"):FindFirstChild("imgui2") then
+    game:GetService("CoreGui"):FindFirstChild("imgui2"):Destroy()
+end
+
+-- Remove all the GUI object creation code and replace with Drawing library logic
+
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+
+-- Create a container for our drawing objects
+local drawingObjects = {}
+local windows = {}
+local activeElements = {}
+
+local colorpicking = false
+local sliding = false
+
+local event = { } do
+    function event.new()
+        local event event = setmetatable({
+            Alive = true,
+        }, {
+            __tostring = function()
+                return "Event"
+            end,
+            __call = function(...)
+                event:Fire(...)
+            end,
+        })
+        local BindableEvent = Instance.new("BindableEvent")
+
+        function event:Connect(callback)
+            local c = { }
+            local Connection = BindableEvent.Event:Connect(callback)
+            c.Connected = true
+            function c:Disconnect()
+                Connection:Disconnect()
+                c.Connected = false
+            end
+
+            return c
+        end
+
+        function event:Fire(...)
+            BindableEvent:Fire(...)
+        end
+
+        function event:Destroy()
+            event.Alive = false
+            BindableEvent:Destroy()
+        end
+
+        return event
+    end
+end
+
+local mouse = { } do
+    mouse.held = false
+    mouse.InputBegan = event.new()
+    mouse.InputEnded = event.new()
+    UserInputService.InputBegan:Connect(function(inputObject)
+        if inputObject.UserInputType == Enum.UserInputType.MouseButton1 then
+            mouse.held = true
+            mouse.InputBegan:Fire()
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(inputObject)
+        if inputObject.UserInputType == Enum.UserInputType.MouseButton1 then
+            mouse.held = false
+            mouse.InputEnded:Fire()
+        end
+    end)
+end
+
+local function getMouse()
+	return Vector2.new(UserInputService:GetMouseLocation().X, UserInputService:GetMouseLocation().Y)
+end
+
+local function createRoundedRectangle(parent, position, size, color, transparency, rounding)
+    local rectangle = Drawing.new("Square")
+    rectangle.Filled = true
+    rectangle.Color = color
+    rectangle.Transparency = transparency
+    rectangle.Position = position
+    rectangle.Size = size
+    rectangle.Visible = true
+    
+    -- Store in our container
+    if not drawingObjects[parent] then
+        drawingObjects[parent] = {}
+    end
+    table.insert(drawingObjects[parent], rectangle)
+    
+    return rectangle
+end
+
+local function createText(parent, position, text, color, size, font)
+    local textObj = Drawing.new("Text")
+    textObj.Text = text
+    textObj.Color = color
+    textObj.Size = size
+    textObj.Position = position
+    textObj.Visible = true
+    textObj.Center = false
+    
+    if not drawingObjects[parent] then
+        drawingObjects[parent] = {}
+    end
+    table.insert(drawingObjects[parent], textObj)
+    
+    return textObj
+end
+
+local function destroyDrawings(parent)
+    if drawingObjects[parent] then
+        for _, drawing in pairs(drawingObjects[parent]) do
+            drawing:Remove()
+        end
+        drawingObjects[parent] = nil
+    end
+end
+
+local function isPointInRectangle(point, rectPos, rectSize)
+    return point.X >= rectPos.X and point.X <= rectPos.X + rectSize.X and
+           point.Y >= rectPos.Y and point.Y <= rectPos.Y + rectSize.Y
+end
+
+local windowHistory = { }
+local windowCache = { }
+local mouseCache = { }
+local browsingWindow = { }
+
+local function updateWindowHistory()
+    -- For drawing library, we'll handle z-index through draw order
+    -- Higher z-index elements are drawn last
+end
+
+local function cacheWindowHistory(window)
+    -- Not needed for drawing library
+end
+
+local function setTopMost(window)
+    local copy = { }
+    local n = 2
+    for i, v in next, windowHistory do
+        if i ~= window then
+            windowHistory[i] = v + 1
+        end
+    end
+    windowHistory[window] = 1
+    updateWindowHistory()
+end
+
+local function isTopMost(window)
+    return rawget(windowHistory, window) == 1
+end
+
+local function isBrowsing(window)
+    return not not (rawget(browsingWindow, window) or rawget(mouseCache, window))
+end
+
+local function findBrowsingTopMost()
+    local copy = { }
+    for i, v in next, windowHistory do
+        if isBrowsing(i) then
+            copy[i] = v
+        end
+    end
+    local level, result = math.huge
+    for i, v in next, copy do
+        if v < level then
+            level = v
+            result = i
+        end
+    end
+    return result
+end
+
+local dragger = {} do
+    local draggerCache = { }
+
+    function dragger.new(frame)
+        -- For drawing library, we'll handle dragging differently
+        -- This will be implemented in the window creation
+    end
+end
+
+local function betweenOpenInterval(n, n1, n2)
+    return n <= n2 and n >= n1
+end
+
+local function betweenClosedInterval(n, n1, n2)
+    return n < n2 and n > n1
+end
+
+local function rgbtohsv(color)
+	local r = color.r
+    local g = color.g
+    local b = color.b
+	local max, min = math.max(r, g, b), math.min(r, g, b)
+	local h, s, v
+	v = max
+
+	local d = max - min
+	if max == 0 then
+		s = 0
+	else
+		s = d / max
+	end
+
+	if max == min then
+		h = 0
+	else
+		if max == r then
+			h = (g - b) / d
+			if g < b then
+				h = h + 6
+			end
+		elseif max == g then
+			h = (b - r) / d + 2
+		elseif max == b then
+			h = (r - g) / d + 4
+		end
+		h = h / 6
+	end
+
+	return h, s, v
+end
+
+local function tint(c)
+    return Color3.new(c.R * 0.5, c.G * 0.5, c.B * 0.5)
+end
+
+local function bleach(c)
+    return Color3.new(c.R * 1.2, c.G * 1.2, c.B * 1.2)
+end
+
+local function hoverColor(object)
+    -- Will be handled differently in drawing library
+end
+
+local settings = {
+    new = function(default)
+        local function l(r)
+            return tostring(r):lower()
+        end
+        return { handle = function(options)
+            local self = { }
+            options = typeof(options) == "table" and options or { }
+            for i, v in next, default do
+                self[l(i)] = v
+            end
+            for i, v in next, options do
+                if typeof(default[l(i)]) == typeof(options[l(i)]) then
+                    self[l(i)] = v
+                end
+            end
+            return self
+        end }
+    end,
+}
+
+local library = {
+    new = function(options)
+        local cache = { }
+        local self = {
+            isopen = true,
+        }
+
+        options = settings.new({
+            text = "New Window",
+            size = Vector2.new(300, 200),
+            shadow = 10,
+            transparency = 0.2,
+            color = Color3.fromRGB(41, 74, 122),
+            boardcolor = Color3.fromRGB(21, 22, 23),
+            rounding = 5,
+            animation = 0.1,
+            position = UDim2.new(0, 100, 0, 100),
+        }).handle(options)
+
+        -- Create window using Drawing library
+        local windowId = "window_" .. tostring(math.random(1, 10000))
+        windows[windowId] = {
+            position = options.position,
+            size = options.size,
+            color = options.color,
+            boardcolor = options.boardcolor,
+            text = options.text,
+            isopen = self.isopen,
+            elements = {}
+        }
+
+        -- Create main window rectangle
+        local mainRect = createRoundedRectangle(
+            windowId,
+            Vector2.new(options.position.X.Offset, options.position.Y.Offset),
+            Vector2.new(options.size.X, 22),
+            options.color,
+            1 - options.transparency,
+            options.rounding
+        )
+
+        -- Create title text
+        local titleText = createText(
+            windowId,
+            Vector2.new(options.position.X.Offset + 30, options.position.Y.Offset + 3),
+            options.text,
+            Color3.new(1, 1, 1),
+            16,
+            "Code"
+        )
+
+        -- Create content area
+        local contentRect = createRoundedRectangle(
+            windowId,
+            Vector2.new(options.position.X.Offset, options.position.Y.Offset + 22),
+            Vector2.new(options.size.X, options.size.Y),
+            options.boardcolor,
+            1 - options.transparency,
+            options.rounding
+        )
+
+        -- Store elements
+        windows[windowId].elements.main = mainRect
+        windows[windowId].elements.title = titleText
+        windows[windowId].elements.content = contentRect
+
+        -- Handle dragging
+        local isDragging = false
+        local dragOffset = Vector2.new(0, 0)
+        
+        -- Check for mouse interactions
+        RunService.Heartbeat:Connect(function()
+            local mousePos = getMouse()
+            local windowPos = Vector2.new(options.position.X.Offset, options.position.Y.Offset)
+            local windowSize = Vector2.new(options.size.X, 22) -- Only title bar is draggable
+            
+            if isPointInRectangle(mousePos, windowPos, windowSize) and mouse.held then
+                if not isDragging then
+                    isDragging = true
+                    dragOffset = mousePos - windowPos
+                end
+            elseif not mouse.held then
+                isDragging = false
+            end
+            
+            if isDragging then
+                local newPos = mousePos - dragOffset
+                options.position = UDim2.new(0, newPos.X, 0, newPos.Y)
+                
+                -- Update all drawings for this window
+                mainRect.Position = newPos
+                titleText.Position = Vector2.new(newPos.X + 30, newPos.Y + 3)
+                contentRect.Position = Vector2.new(newPos.X, newPos.Y + 22)
+                
+                -- Update window data
+                windows[windowId].position = options.position
+            end
+        end)
+
+        function self.new(tabOptions)
+            local self = { }
+            tabOptions = settings.new({
+                text = "New Tab",
+            }).handle(tabOptions)
+
+            -- Tab implementation would go here
+            -- Similar structure but using Drawing library
+
+            local types = { } do
+                function types.label(labelOptions)
+                    local self = { }
+                    -- Label implementation using Drawing library
+                    return self
+                end
+
+                function types.button(buttonOptions)
+                    local self = { }
+                    -- Button implementation using Drawing library
+                    return self
+                end
+
+                function types.switch(switchOptions)
+                    local self = { }
+                    -- Switch implementation using Drawing library
+                    return self
+                end
+
+                function types.slider(sliderOptions)
+                    local self = { }
+                    -- Slider implementation using Drawing library
+                    return self
+                end
+
+                function types.color(colorOptions)
+                    local self = { }
+                    -- Color picker implementation using Drawing library
+                    return self
+                end
+
+                function types.dropdown(dropdownOptions)
+                    local self = { }
+                    -- Dropdown implementation using Drawing library
+                    return self
+                end
+
+                function types.dock(dockOptions)
+                    local self = { }
+                    -- Dock implementation using Drawing library
+                    return self
+                end
+
+                function types.folder(folderOptions)
+                    local self = { }
+                    -- Folder implementation using Drawing library
+                    return self
+                end
+            end
+
+            function self.new(type, typeOptions)
+                -- Create elements using drawing library
+                return setmetatable({}, {
+                    __index = function(self, idx)
+                        return rawget(rawget(self, "event"), idx)
+                    end,
+                    __newindex = function()end,
+                })
+            end
+
+            function self.show()
+                -- Show tab implementation
+            end
+
+            self.show()
+            return self
+        end
+
+        function self.close()
+            if not self.isopen then return end
+            self.isopen = false
+            windows[windowId].isopen = false
+            
+            -- Hide content area
+            if windows[windowId].elements.content then
+                windows[windowId].elements.content.Visible = false
+            end
+        end
+
+        function self.open()
+            if self.isopen then return end
+            self.isopen = true
+            windows[windowId].isopen = true
+            
+            -- Show content area
+            if windows[windowId].elements.content then
+                windows[windowId].elements.content.Visible = true
+            end
+        end
+
+        function self.setPosition(pos)
+            options.position = pos
+            windows[windowId].position = pos
+            
+            -- Update all drawings
+            local elements = windows[windowId].elements
+            if elements.main then
+                elements.main.Position = Vector2.new(pos.X.Offset, pos.Y.Offset)
+            end
+            if elements.title then
+                elements.title.Position = Vector2.new(pos.X.Offset + 30, pos.Y.Offset + 3)
+            end
+            if elements.content then
+                elements.content.Position = Vector2.new(pos.X.Offset, pos.Y.Offset + 22)
+            end
+        end
+
+        function self.destroy()
+            destroyDrawings(windowId)
+            windows[windowId] = nil
+        end
+
+        return self
+    end,
+}
+
+-- Cleanup function
+game:GetService("Players").LocalPlayer:GetPropertyChangedSignal("Parent"):Connect(function()
+    if not game:GetService("Players").LocalPlayer.Parent then
+        for windowId, _ in pairs(drawingObjects) do
+            destroyDrawings(windowId)
+        end
+    end
+end)
+
+return library
