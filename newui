@@ -1,0 +1,1094 @@
+--[[
+	rbimgui-2 Drawing Library Version
+	version 1.2
+	by Singularity
+--]]
+
+repeat wait() until game:GetService("Players").LocalPlayer
+
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+local TextService = game:GetService("TextService")
+
+-- Create a container for our drawing objects
+local drawingObjects = {}
+local windows = {}
+local elements = {}
+local activeWindow = nil
+
+local colorpicking = false
+local sliding = false
+
+local event = { } do
+    function event.new()
+        local event = setmetatable({
+            Alive = true,
+        }, {
+            __tostring = function()
+                return "Event"
+            end,
+            __call = function(self, ...)
+                self:Fire(...)
+            end,
+        })
+        local BindableEvent = Instance.new("BindableEvent")
+
+        function event:Connect(callback)
+            local c = { }
+            local Connection = BindableEvent.Event:Connect(callback)
+            c.Connected = true
+            function c:Disconnect()
+                Connection:Disconnect()
+                c.Connected = false
+            end
+
+            return c
+        end
+
+        function event:Fire(...)
+            BindableEvent:Fire(...)
+        end
+
+        function event:Destroy()
+            event.Alive = false
+            BindableEvent:Destroy()
+        end
+
+        return event
+    end
+end
+
+local mouse = { } do
+    mouse.held = false
+    mouse.InputBegan = event.new()
+    mouse.InputEnded = event.new()
+    UserInputService.InputBegan:Connect(function(inputObject)
+        if inputObject.UserInputType == Enum.UserInputType.MouseButton1 then
+            mouse.held = true
+            mouse.InputBegan:Fire()
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(inputObject)
+        if inputObject.UserInputType == Enum.UserInputType.MouseButton1 then
+            mouse.held = false
+            mouse.InputEnded:Fire()
+        end
+    end)
+end
+
+local function getMouse()
+	return Vector2.new(UserInputService:GetMouseLocation().X, UserInputService:GetMouseLocation().Y)
+end
+
+local function createRoundedRectangle(parent, position, size, color, transparency, rounding)
+    local rectangle = Drawing.new("Square")
+    rectangle.Filled = true
+    rectangle.Color = color
+    rectangle.Transparency = transparency or 1
+    rectangle.Position = position
+    rectangle.Size = size
+    rectangle.Visible = true
+    rectangle.Thickness = 1
+    
+    if not drawingObjects[parent] then
+        drawingObjects[parent] = {}
+    end
+    table.insert(drawingObjects[parent], rectangle)
+    
+    return rectangle
+end
+
+local function createText(parent, position, text, color, size, font)
+    local textObj = Drawing.new("Text")
+    textObj.Text = text
+    textObj.Color = color
+    textObj.Size = size or 14
+    textObj.Position = position
+    textObj.Visible = true
+    textObj.Center = false
+    textObj.Font = font or 2 -- 0=UI, 1=System, 2=Code
+    
+    if not drawingObjects[parent] then
+        drawingObjects[parent] = {}
+    end
+    table.insert(drawingObjects[parent], textObj)
+    
+    return textObj
+end
+
+local function createLine(parent, from, to, color, thickness)
+    local line = Drawing.new("Line")
+    line.From = from
+    line.To = to
+    line.Color = color
+    line.Thickness = thickness or 1
+    line.Visible = true
+    
+    if not drawingObjects[parent] then
+        drawingObjects[parent] = {}
+    end
+    table.insert(drawingObjects[parent], line)
+    
+    return line
+end
+
+local function destroyDrawings(parent)
+    if drawingObjects[parent] then
+        for _, drawing in pairs(drawingObjects[parent]) do
+            drawing:Remove()
+        end
+        drawingObjects[parent] = nil
+    end
+end
+
+local function isPointInRectangle(point, rectPos, rectSize)
+    return point.X >= rectPos.X and point.X <= rectPos.X + rectSize.X and
+           point.Y >= rectPos.Y and point.Y <= rectPos.Y + rectSize.Y
+end
+
+local function getTextSize(text, size, font)
+    -- Estimate text size since we can't use TextService with Drawing library
+    return Vector2.new(#text * (size * 0.6), size * 1.2)
+end
+
+local function tint(c)
+    return Color3.new(c.R * 0.5, c.G * 0.5, c.B * 0.5)
+end
+
+local function bleach(c)
+    return Color3.new(c.R * 1.2, c.G * 1.2, c.B * 1.2)
+end
+
+local function rgbtohsv(color)
+	local r = color.r
+    local g = color.g
+    local b = color.b
+	local max, min = math.max(r, g, b), math.min(r, g, b)
+	local h, s, v
+	v = max
+
+	local d = max - min
+	if max == 0 then
+		s = 0
+	else
+		s = d / max
+	end
+
+	if max == min then
+		h = 0
+	else
+		if max == r then
+			h = (g - b) / d
+			if g < b then
+				h = h + 6
+			end
+		elseif max == g then
+			h = (b - r) / d + 2
+		elseif max == b then
+			h = (r - g) / d + 4
+		end
+		h = h / 6
+	end
+
+	return h, s, v
+end
+
+local settings = {
+    new = function(default)
+        local function l(r)
+            return tostring(r):lower()
+        end
+        return { handle = function(options)
+            local self = { }
+            options = typeof(options) == "table" and options or { }
+            for i, v in next, default do
+                self[l(i)] = v
+            end
+            for i, v in next, options do
+                if typeof(default[l(i)]) == typeof(options[l(i)]) then
+                    self[l(i)] = v
+                end
+            end
+            return self
+        end }
+    end,
+}
+
+local library = {
+    new = function(options)
+        local cache = { }
+        local self = {
+            isopen = true,
+            tabs = {},
+            currentTab = nil
+        }
+
+        options = settings.new({
+            text = "New Window",
+            size = Vector2.new(300, 200),
+            transparency = 0.2,
+            color = Color3.fromRGB(41, 74, 122),
+            boardcolor = Color3.fromRGB(21, 22, 23),
+            rounding = 5,
+            animation = 0.1,
+            position = Vector2.new(100, 100),
+        }).handle(options)
+
+        -- Create window ID
+        local windowId = "window_" .. tostring(math.random(1, 10000))
+        windows[windowId] = {
+            position = options.position,
+            size = options.size,
+            color = options.color,
+            boardcolor = options.boardcolor,
+            text = options.text,
+            isopen = self.isopen,
+            elements = {},
+            tabs = {},
+            currentTab = nil
+        }
+
+        -- Create main window elements
+        local mainRect = createRoundedRectangle(
+            windowId,
+            options.position,
+            Vector2.new(options.size.X, 22),
+            options.color,
+            1 - options.transparency
+        )
+
+        local titleText = createText(
+            windowId,
+            options.position + Vector2.new(30, 3),
+            options.text,
+            Color3.new(1, 1, 1),
+            16,
+            2
+        )
+
+        local contentRect = createRoundedRectangle(
+            windowId,
+            options.position + Vector2.new(0, 22),
+            Vector2.new(options.size.X, options.size.Y),
+            options.boardcolor,
+            1 - options.transparency
+        )
+
+        -- Store elements
+        windows[windowId].elements.main = mainRect
+        windows[windowId].elements.title = titleText
+        windows[windowId].elements.content = contentRect
+
+        -- Handle dragging
+        local isDragging = false
+        local dragOffset = Vector2.new(0, 0)
+        
+        -- Mouse interaction handling
+        RunService.Heartbeat:Connect(function()
+            local mousePos = getMouse()
+            local windowPos = windows[windowId].position
+            local titleBarSize = Vector2.new(options.size.X, 22)
+            
+            if isPointInRectangle(mousePos, windowPos, titleBarSize) then
+                if mouse.held and not isDragging then
+                    isDragging = true
+                    dragOffset = mousePos - windowPos
+                    activeWindow = windowId
+                end
+            end
+            
+            if isDragging and mouse.held then
+                local newPos = mousePos - dragOffset
+                windows[windowId].position = newPos
+                
+                -- Update all drawings for this window
+                mainRect.Position = newPos
+                titleText.Position = newPos + Vector2.new(30, 3)
+                contentRect.Position = newPos + Vector2.new(0, 22)
+                
+                -- Update tab elements if they exist
+                if windows[windowId].currentTab then
+                    local tabId = windows[windowId].currentTab
+                    if elements[tabId] then
+                        for _, element in pairs(elements[tabId]) do
+                            if element.updatePosition then
+                                element:updatePosition(newPos)
+                            end
+                        end
+                    end
+                end
+            else
+                isDragging = false
+            end
+        end)
+
+        function self.new(tabOptions)
+            local tabSelf = { }
+            tabOptions = settings.new({
+                text = "New Tab",
+            }).handle(tabOptions)
+
+            local tabId = windowId .. "_tab_" .. tostring(math.random(1, 10000))
+            windows[windowId].tabs[tabId] = {
+                text = tabOptions.text,
+                elements = {}
+            }
+            
+            if not windows[windowId].currentTab then
+                windows[windowId].currentTab = tabId
+            end
+
+            local types = { } do
+                function types.label(labelOptions)
+                    local elementSelf = { }
+                    labelOptions = settings.new({
+                        text = "New Label",
+                        color = Color3.new(1, 1, 1),
+                    }).handle(labelOptions)
+
+                    local elementId = tabId .. "_label_" .. tostring(math.random(1, 10000))
+                    
+                    if not elements[tabId] then
+                        elements[tabId] = {}
+                    end
+                    
+                    local label = createText(
+                        elementId,
+                        windows[windowId].position + Vector2.new(10, 40),
+                        labelOptions.text,
+                        labelOptions.color,
+                        14,
+                        2
+                    )
+                    
+                    elements[tabId][elementId] = {
+                        object = label,
+                        type = "label",
+                        updatePosition = function(newPos)
+                            label.Position = newPos + Vector2.new(10, 40)
+                        end
+                    }
+
+                    function elementSelf.setText(text)
+                        label.Text = text
+                    end
+
+                    function elementSelf.setColor(color)
+                        label.Color = color
+                    end
+
+                    function elementSelf:Destroy()
+                        destroyDrawings(elementId)
+                        elements[tabId][elementId] = nil
+                    end
+
+                    elementSelf.self = label
+                    return elementSelf
+                end
+
+                function types.button(buttonOptions)
+                    local elementSelf = { }
+                    elementSelf.event = event.new()
+                    elementSelf.eventBlock = false
+
+                    buttonOptions = settings.new({
+                        text = "New Button",
+                        color = options.color,
+                    }).handle(buttonOptions)
+
+                    local elementId = tabId .. "_button_" .. tostring(math.random(1, 10000))
+                    
+                    if not elements[tabId] then
+                        elements[tabId] = {}
+                    end
+                    
+                    -- Create button background
+                    local buttonRect = createRoundedRectangle(
+                        elementId,
+                        windows[windowId].position + Vector2.new(10, 60),
+                        Vector2.new(buttonOptions.text:len() * 8 + 20, 20),
+                        buttonOptions.color,
+                        1
+                    )
+                    
+                    local buttonText = createText(
+                        elementId,
+                        windows[windowId].position + Vector2.new(20, 63),
+                        buttonOptions.text,
+                        Color3.new(1, 1, 1),
+                        14,
+                        2
+                    )
+                    
+                    elements[tabId][elementId] = {
+                        object = buttonRect,
+                        text = buttonText,
+                        type = "button",
+                        updatePosition = function(newPos)
+                            buttonRect.Position = newPos + Vector2.new(10, 60)
+                            buttonText.Position = newPos + Vector2.new(20, 63)
+                        end
+                    }
+
+                    -- Mouse interaction
+                    local isHovered = false
+                    RunService.Heartbeat:Connect(function()
+                        if windows[windowId].currentTab == tabId and windows[windowId].isopen then
+                            local mousePos = getMouse()
+                            local buttonPos = buttonRect.Position
+                            local buttonSize = buttonRect.Size
+                            
+                            if isPointInRectangle(mousePos, buttonPos, buttonSize) then
+                                if not isHovered then
+                                    isHovered = true
+                                    buttonRect.Color = tint(buttonOptions.color)
+                                end
+                                
+                                if mouse.held and activeWindow == windowId then
+                                    elementSelf.event:Fire()
+                                end
+                            elseif isHovered then
+                                isHovered = false
+                                buttonRect.Color = buttonOptions.color
+                            end
+                        end
+                    end)
+
+                    function elementSelf.setColor(color)
+                        buttonRect.Color = color
+                    end
+
+                    function elementSelf:Destroy()
+                        destroyDrawings(elementId)
+                        elements[tabId][elementId] = nil
+                    end
+
+                    elementSelf.options = buttonOptions
+                    elementSelf.self = buttonRect
+                    return elementSelf
+                end
+
+                function types.switch(switchOptions)
+                    local elementSelf = { }
+                    elementSelf.on = false
+                    elementSelf.event = event.new()
+                    elementSelf.eventBlock = false
+
+                    switchOptions = settings.new({
+                        text = "New Switch",
+                        on = false,
+                        color = options.color,
+                    }).handle(switchOptions)
+                    elementSelf.on = switchOptions.on
+
+                    local elementId = tabId .. "_switch_" .. tostring(math.random(1, 10000))
+                    
+                    if not elements[tabId] then
+                        elements[tabId] = {}
+                    end
+                    
+                    -- Create switch background
+                    local switchRect = createRoundedRectangle(
+                        elementId,
+                        windows[windowId].position + Vector2.new(10, 90),
+                        Vector2.new(20, 20),
+                        elementSelf.on and switchOptions.color or tint(switchOptions.color),
+                        1
+                    )
+                    
+                    local switchText = createText(
+                        elementId,
+                        windows[windowId].position + Vector2.new(38, 93),
+                        switchOptions.text,
+                        Color3.new(1, 1, 1),
+                        14,
+                        2
+                    )
+                    
+                    elements[tabId][elementId] = {
+                        object = switchRect,
+                        text = switchText,
+                        type = "switch",
+                        updatePosition = function(newPos)
+                            switchRect.Position = newPos + Vector2.new(10, 90)
+                            switchText.Position = newPos + Vector2.new(38, 93)
+                        end
+                    }
+
+                    function elementSelf.switch()
+                        elementSelf.set(not elementSelf.on)
+                    end
+
+                    function elementSelf.set(boolean)
+                        if (not not boolean) == elementSelf.on then return end
+                        elementSelf.on = not not boolean
+                        switchRect.Color = elementSelf.on and switchOptions.color or tint(switchOptions.color)
+                        if not elementSelf.eventBlock then
+                            elementSelf.event:Fire(elementSelf.on)
+                        end
+                    end
+
+                    -- Mouse interaction
+                    RunService.Heartbeat:Connect(function()
+                        if windows[windowId].currentTab == tabId and windows[windowId].isopen then
+                            local mousePos = getMouse()
+                            local switchPos = switchRect.Position
+                            local switchSize = Vector2.new(58 + switchText.Text:len() * 8, 20)
+                            
+                            if isPointInRectangle(mousePos, switchPos, switchSize) and mouse.held and activeWindow == windowId then
+                                elementSelf.switch()
+                                wait(0.2) -- Prevent rapid clicking
+                            end
+                        end
+                    end)
+
+                    function elementSelf:Destroy()
+                        destroyDrawings(elementId)
+                        elements[tabId][elementId] = nil
+                    end
+
+                    elementSelf.options = switchOptions
+                    elementSelf.self = switchRect
+                    return elementSelf
+                end
+
+                function types.slider(sliderOptions)
+                    local elementSelf = { }
+                    elementSelf.event = event.new()
+                    elementSelf.eventBlock = false
+
+                    sliderOptions = settings.new({
+                        text = "New Slider",
+                        size = 150,
+                        min = 0,
+                        max = 100,
+                        value = 0,
+                        color = options.color,
+                    }).handle(sliderOptions)
+                    elementSelf.value = sliderOptions.value
+
+                    local elementId = tabId .. "_slider_" .. tostring(math.random(1, 10000))
+                    
+                    if not elements[tabId] then
+                        elements[tabId] = {}
+                    end
+                    
+                    -- Create slider track
+                    local trackRect = createRoundedRectangle(
+                        elementId,
+                        windows[windowId].position + Vector2.new(10, 120),
+                        Vector2.new(sliderOptions.size, 6),
+                        tint(sliderOptions.color),
+                        1
+                    )
+                    
+                    -- Create slider fill
+                    local fillRect = createRoundedRectangle(
+                        elementId,
+                        windows[windowId].position + Vector2.new(10, 120),
+                        Vector2.new(0, 6),
+                        sliderOptions.color,
+                        1
+                    )
+                    
+                    local valueText = createText(
+                        elementId,
+                        windows[windowId].position + Vector2.new(15, 122),
+                        tostring(math.floor(elementSelf.value)),
+                        Color3.new(1, 1, 1),
+                        12,
+                        2
+                    )
+                    
+                    local nameText = createText(
+                        elementId,
+                        windows[windowId].position + Vector2.new(sliderOptions.size + 20, 122),
+                        sliderOptions.text,
+                        Color3.new(1, 1, 1),
+                        14,
+                        2
+                    )
+                    
+                    elements[tabId][elementId] = {
+                        track = trackRect,
+                        fill = fillRect,
+                        valueText = valueText,
+                        nameText = nameText,
+                        type = "slider",
+                        updatePosition = function(newPos)
+                            trackRect.Position = newPos + Vector2.new(10, 120)
+                            fillRect.Position = newPos + Vector2.new(10, 120)
+                            valueText.Position = newPos + Vector2.new(15, 122)
+                            nameText.Position = newPos + Vector2.new(sliderOptions.size + 20, 122)
+                        end
+                    }
+
+                    function elementSelf.set(n)
+                        local min, max = sliderOptions.min, sliderOptions.max
+                        if max > min then
+                            n = math.clamp(n, min, max)
+                        else
+                            n = math.clamp(n, max, min)
+                        end
+                        elementSelf.value = n
+                        valueText.Text = tostring(math.floor(n))
+                        
+                        local percentage = (n - min) / (max - min)
+                        fillRect.Size = Vector2.new(sliderOptions.size * percentage, 6)
+                        
+                        if not elementSelf.eventBlock then
+                            elementSelf.event:Fire(elementSelf.value)
+                        end
+                    end
+
+                    -- Mouse interaction
+                    local isDraggingSlider = false
+                    RunService.Heartbeat:Connect(function()
+                        if windows[windowId].currentTab == tabId and windows[windowId].isopen then
+                            local mousePos = getMouse()
+                            local trackPos = trackRect.Position
+                            local trackSize = trackRect.Size
+                            
+                            if isPointInRectangle(mousePos, trackPos, trackSize) and mouse.held and activeWindow == windowId then
+                                isDraggingSlider = true
+                            end
+                            
+                            if isDraggingSlider and mouse.held then
+                                local relativeX = mousePos.X - trackPos.X
+                                local percentage = math.clamp(relativeX / trackSize.X, 0, 1)
+                                local value = sliderOptions.min + (sliderOptions.max - sliderOptions.min) * percentage
+                                elementSelf.set(value)
+                            else
+                                isDraggingSlider = false
+                            end
+                        end
+                    end)
+
+                    -- Set initial value
+                    elementSelf.set(elementSelf.value)
+
+                    function elementSelf:Destroy()
+                        destroyDrawings(elementId)
+                        elements[tabId][elementId] = nil
+                    end
+
+                    elementSelf.options = sliderOptions
+                    elementSelf.self = trackRect
+                    return elementSelf
+                end
+
+                function types.color(colorOptions)
+                    local elementSelf = { }
+                    elementSelf.event = event.new()
+                    elementSelf.isopen = false
+                    elementSelf.visible = false
+                    elementSelf.eventBlock = false
+
+                    colorOptions = settings.new({
+                        text = "New Color Picker",
+                        color = Color3.new(1, 0, 0),
+                    }).handle(colorOptions)
+
+                    local elementId = tabId .. "_color_" .. tostring(math.random(1, 10000))
+                    
+                    if not elements[tabId] then
+                        elements[tabId] = {}
+                    end
+                    
+                    -- Create color button
+                    local colorRect = createRoundedRectangle(
+                        elementId,
+                        windows[windowId].position + Vector2.new(10, 150),
+                        Vector2.new(20, 20),
+                        colorOptions.color,
+                        1
+                    )
+                    
+                    local colorText = createText(
+                        elementId,
+                        windows[windowId].position + Vector2.new(38, 153),
+                        colorOptions.text,
+                        Color3.new(1, 1, 1),
+                        14,
+                        2
+                    )
+                    
+                    elements[tabId][elementId] = {
+                        object = colorRect,
+                        text = colorText,
+                        type = "color",
+                        updatePosition = function(newPos)
+                            colorRect.Position = newPos + Vector2.new(10, 150)
+                            colorText.Position = newPos + Vector2.new(38, 153)
+                        end
+                    }
+
+                    function elementSelf.set(color)
+                        colorRect.Color = color
+                        if not elementSelf.eventBlock then
+                            elementSelf.event:Fire(color)
+                        end
+                    end
+
+                    -- Mouse interaction
+                    RunService.Heartbeat:Connect(function()
+                        if windows[windowId].currentTab == tabId and windows[windowId].isopen then
+                            local mousePos = getMouse()
+                            local colorPos = colorRect.Position
+                            local colorSize = Vector2.new(38 + colorText.Text:len() * 8, 20)
+                            
+                            if isPointInRectangle(mousePos, colorPos, colorSize) and mouse.held and activeWindow == windowId then
+                                -- Simple color cycle for demo
+                                local current = colorRect.Color
+                                local newColor = Color3.new(
+                                    (current.R + 0.3) % 1,
+                                    (current.G + 0.2) % 1,
+                                    (current.B + 0.1) % 1
+                                )
+                                elementSelf.set(newColor)
+                                wait(0.3) -- Prevent rapid clicking
+                            end
+                        end
+                    end)
+
+                    function elementSelf:Destroy()
+                        destroyDrawings(elementId)
+                        elements[tabId][elementId] = nil
+                    end
+
+                    elementSelf.self = colorRect
+                    return elementSelf
+                end
+
+                function types.dropdown(dropdownOptions)
+                    local elementSelf = { }
+                    elementSelf.isopen = false
+                    elementSelf.visible = false
+                    elementSelf.selected = nil
+                    elementSelf.event = event.new()
+                    elementSelf.eventBlock = false
+                    elementSelf.options = {}
+
+                    dropdownOptions = settings.new({
+                        text = "New Dropdown",
+                        size = 150,
+                    }).handle(dropdownOptions)
+
+                    local elementId = tabId .. "_dropdown_" .. tostring(math.random(1, 10000))
+                    
+                    if not elements[tabId] then
+                        elements[tabId] = {}
+                    end
+                    
+                    -- Create dropdown background
+                    local dropdownRect = createRoundedRectangle(
+                        elementId,
+                        windows[windowId].position + Vector2.new(10, 180),
+                        Vector2.new(dropdownOptions.size, 20),
+                        tint(options.color),
+                        1
+                    )
+                    
+                    local dropdownText = createText(
+                        elementId,
+                        windows[windowId].position + Vector2.new(20, 183),
+                        "[...]",
+                        Color3.new(1, 1, 1),
+                        14,
+                        2
+                    )
+                    
+                    local nameText = createText(
+                        elementId,
+                        windows[windowId].position + Vector2.new(dropdownOptions.size + 20, 183),
+                        dropdownOptions.text,
+                        Color3.new(1, 1, 1),
+                        14,
+                        2
+                    )
+                    
+                    elements[tabId][elementId] = {
+                        object = dropdownRect,
+                        text = dropdownText,
+                        nameText = nameText,
+                        type = "dropdown",
+                        updatePosition = function(newPos)
+                            dropdownRect.Position = newPos + Vector2.new(10, 180)
+                            dropdownText.Position = newPos + Vector2.new(20, 183)
+                            nameText.Position = newPos + Vector2.new(dropdownOptions.size + 20, 183)
+                        end
+                    }
+
+                    function elementSelf.new(name)
+                        table.insert(elementSelf.options, name)
+                        if not elementSelf.selected then
+                            elementSelf.selected = name
+                            dropdownText.Text = "[ " .. name .. " ]"
+                            elementSelf.event:Fire(name)
+                        end
+                    end
+
+                    -- Mouse interaction
+                    RunService.Heartbeat:Connect(function()
+                        if windows[windowId].currentTab == tabId and windows[windowId].isopen then
+                            local mousePos = getMouse()
+                            local dropdownPos = dropdownRect.Position
+                            local dropdownSize = dropdownRect.Size
+                            
+                            if isPointInRectangle(mousePos, dropdownPos, dropdownSize) and mouse.held and activeWindow == windowId then
+                                if #elementSelf.options > 0 then
+                                    local currentIndex = table.find(elementSelf.options, elementSelf.selected) or 1
+                                    local nextIndex = (currentIndex % #elementSelf.options) + 1
+                                    elementSelf.selected = elementSelf.options[nextIndex]
+                                    dropdownText.Text = "[ " .. elementSelf.selected .. " ]"
+                                    elementSelf.event:Fire(elementSelf.selected)
+                                end
+                                wait(0.3) -- Prevent rapid clicking
+                            end
+                        end
+                    end)
+
+                    function elementSelf:Destroy()
+                        destroyDrawings(elementId)
+                        elements[tabId][elementId] = nil
+                    end
+
+                    elementSelf.self = dropdownRect
+                    return elementSelf
+                end
+
+                function types.dock(dockOptions)
+                    local elementSelf = { }
+                    dockOptions = settings.new({}).handle(dockOptions)
+
+                    local elementId = tabId .. "_dock_" .. tostring(math.random(1, 10000))
+                    
+                    if not elements[tabId] then
+                        elements[tabId] = {}
+                    end
+                    
+                    elements[tabId][elementId] = {
+                        type = "dock",
+                        elements = {},
+                        updatePosition = function() end
+                    }
+
+                    function elementSelf.new(type, typeOptions)
+                        local p = rawget(types, type)
+                        if p then
+                            local o = p(typeOptions)
+                            table.insert(elements[tabId][elementId].elements, o)
+                            return o
+                        end
+                        return nil
+                    end
+
+                    elementSelf.updated = event.new()
+
+                    function elementSelf:Destroy()
+                        for _, element in pairs(elements[tabId][elementId].elements) do
+                            if element.Destroy then
+                                element:Destroy()
+                            end
+                        end
+                        elements[tabId][elementId] = nil
+                    end
+
+                    elementSelf.self = {Type = "Dock"}
+                    return elementSelf
+                end
+
+                function types.folder(folderOptions)
+                    local elementSelf = { }
+                    elementSelf.isopen = false
+                    folderOptions = settings.new({
+                        text = "New Folder",
+                        isopen = false,
+                    }).handle(folderOptions)
+                    elementSelf.isopen = folderOptions.isopen
+
+                    local elementId = tabId .. "_folder_" .. tostring(math.random(1, 10000))
+                    
+                    if not elements[tabId] then
+                        elements[tabId] = {}
+                    end
+                    
+                    -- Create folder background
+                    local folderRect = createRoundedRectangle(
+                        elementId,
+                        windows[windowId].position + Vector2.new(10, 210),
+                        Vector2.new(options.size.X - 20, 20),
+                        tint(options.color),
+                        1
+                    )
+                    
+                    local folderText = createText(
+                        elementId,
+                        windows[windowId].position + Vector2.new(30, 213),
+                        folderOptions.text,
+                        Color3.new(1, 1, 1),
+                        14,
+                        2
+                    )
+                    
+                    elements[tabId][elementId] = {
+                        object = folderRect,
+                        text = folderText,
+                        type = "folder",
+                        elements = {},
+                        updatePosition = function(newPos)
+                            folderRect.Position = newPos + Vector2.new(10, 210)
+                            folderText.Position = newPos + Vector2.new(30, 213)
+                        end
+                    }
+
+                    function elementSelf.open()
+                        elementSelf.isopen = true
+                        -- In a full implementation, this would show/hide folder contents
+                    end
+
+                    function elementSelf.close()
+                        elementSelf.isopen = false
+                        -- In a full implementation, this would show/hide folder contents
+                    end
+
+                    function elementSelf.new(type, typeOptions)
+                        local p = rawget(types, type)
+                        if p then
+                            local o = p(typeOptions)
+                            table.insert(elements[tabId][elementId].elements, o)
+                            return o
+                        end
+                        return nil
+                    end
+
+                    -- Mouse interaction
+                    RunService.Heartbeat:Connect(function()
+                        if windows[windowId].currentTab == tabId and windows[windowId].isopen then
+                            local mousePos = getMouse()
+                            local folderPos = folderRect.Position
+                            local folderSize = folderRect.Size
+                            
+                            if isPointInRectangle(mousePos, folderPos, folderSize) and mouse.held and activeWindow == windowId then
+                                elementSelf.isopen = not elementSelf.isopen
+                                folderRect.Color = elementSelf.isopen and options.color or tint(options.color)
+                                wait(0.3) -- Prevent rapid clicking
+                            end
+                        end
+                    end)
+
+                    function elementSelf:Destroy()
+                        for _, element in pairs(elements[tabId][elementId].elements) do
+                            if element.Destroy then
+                                element:Destroy()
+                            end
+                        end
+                        destroyDrawings(elementId)
+                        elements[tabId][elementId] = nil
+                    end
+
+                    elementSelf.self = folderRect
+                    if elementSelf.isopen then
+                        elementSelf.open()
+                    else
+                        elementSelf.close()
+                    end
+                    return elementSelf
+                end
+            end
+
+            function tabSelf.new(type, typeOptions)
+                local p = rawget(types, type)
+                if p then
+                    local o = p(typeOptions)
+                    windows[windowId].tabs[tabId].elements[o] = true
+                    return setmetatable(o, {
+                        __index = function(self, idx)
+                            if idx == "event" then
+                                return rawget(self, "event")
+                            end
+                            return rawget(self, idx)
+                        end,
+                        __newindex = function() end,
+                    })
+                end
+                return nil
+            end
+
+            function tabSelf.show()
+                windows[windowId].currentTab = tabId
+            end
+
+            table.insert(self.tabs, tabSelf)
+            if #self.tabs == 1 then
+                tabSelf.show()
+            end
+
+            return tabSelf
+        end
+
+        function self.close()
+            if not self.isopen then return end
+            self.isopen = false
+            windows[windowId].isopen = false
+            windows[windowId].elements.content.Visible = false
+        end
+
+        function self.open()
+            if self.isopen then return end
+            self.isopen = true
+            windows[windowId].isopen = true
+            windows[windowId].elements.content.Visible = true
+        end
+
+        function self.setPosition(pos)
+            if typeof(pos) == "UDim2" then
+                pos = Vector2.new(pos.X.Offset, pos.Y.Offset)
+            end
+            windows[windowId].position = pos
+            
+            local elements = windows[windowId].elements
+            if elements.main then
+                elements.main.Position = pos
+            end
+            if elements.title then
+                elements.title.Position = pos + Vector2.new(30, 3)
+            end
+            if elements.content then
+                elements.content.Position = pos + Vector2.new(0, 22)
+            end
+            
+            -- Update tab elements
+            if windows[windowId].currentTab then
+                local tabId = windows[windowId].currentTab
+                if elements[tabId] then
+                    for _, element in pairs(elements[tabId]) do
+                        if element.updatePosition then
+                            element:updatePosition(pos)
+                        end
+                    end
+                end
+            end
+        end
+
+        function self.destroy()
+            destroyDrawings(windowId)
+            windows[windowId] = nil
+        end
+
+        self.open()
+        return self
+    end,
+}
+
+-- Cleanup
+game:GetService("Players").LocalPlayer:GetPropertyChangedSignal("Parent"):Connect(function()
+    if not game:GetService("Players").LocalPlayer.Parent then
+        for windowId, _ in pairs(drawingObjects) do
+            destroyDrawings(windowId)
+        end
+    end
+end)
+
+return library
